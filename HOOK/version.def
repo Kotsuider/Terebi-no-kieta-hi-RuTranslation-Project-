@@ -1,0 +1,14 @@
+LIBRARY "version.dll"
+EXPORTS
+    GetFileVersionInfoA   = ver_GetFileVersionInfoA
+    GetFileVersionInfoW   = ver_GetFileVersionInfoW
+    GetFileVersionInfoSizeA = ver_GetFileVersionInfoSizeA
+    GetFileVersionInfoSizeW = ver_GetFileVersionInfoSizeW
+    VerQueryValueA        = ver_VerQueryValueA
+    VerQueryValueW        = ver_VerQueryValueW
+    VerFindFileA          = ver_VerFindFileA
+    VerFindFileW          = ver_VerFindFileW
+    VerInstallFileA       = ver_VerInstallFileA
+    VerInstallFileW       = ver_VerInstallFileW
+    VerLanguageNameA      = ver_VerLanguageNameA
+    VerLanguageNameW      = ver_VerLanguageNameW

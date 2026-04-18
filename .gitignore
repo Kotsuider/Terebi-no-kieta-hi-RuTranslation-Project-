@@ -1,0 +1,9 @@
+*.arc
+tvlost.exe
+readme.txt
+_log_except.txt
+/movie
+/save
+/STABLE
+/ScriptEditing/patch
+/ScriptEditing/script
