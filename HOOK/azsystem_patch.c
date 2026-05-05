@@ -134,6 +134,22 @@ static BOOL WINAPI hooked_TextOutA(HDC hdc, int x, int y, LPCSTR str, int cb)
     return g_orig_TextOutA(hdc, x, y, (LPCSTR)&ch, 1);
 }
 
+/* ── SetWindowTextA hook — подмена заголовка окна ── */
+typedef BOOL (WINAPI *SetWindowTextA_t)(HWND, LPCSTR);
+static SetWindowTextA_t g_orig_SetWindowTextA = NULL;
+
+/* "テレビの消えた日" в Shift-JIS */
+static const char g_window_title_sjis[] =
+    "\x83\x65\x83\x8c\x83\x72\x82\xcc\x8f\xc1\x82\xa6\x82\xbd\x93\xfa";
+
+static BOOL WINAPI hooked_SetWindowTextA(HWND hWnd, LPCSTR str)
+{
+    if (str && strcmp(str, g_window_title_sjis) == 0)
+        return g_orig_SetWindowTextA(hWnd,
+            "\xc4\xe5\xed\xfc\x2c\x20\xea\xee\xe3\xe4\xe0\x20\xef\xf0\xee\xef\xe0\xeb\xee\x20\xf2\xe5\xeb\xe5\xe2\xe8\xe4\xe5\xed\xe8\xe5");
+    return g_orig_SetWindowTextA(hWnd, str);
+}
+
 /* ── CreateFontA hook ── */
 typedef HFONT (WINAPI *CreateFontA_t)(int,int,int,int,int,DWORD,DWORD,DWORD,
     DWORD,DWORD,DWORD,DWORD,DWORD,LPCSTR);
@@ -145,6 +161,47 @@ static HFONT WINAPI hooked_CreateFontA(int h, int w, int esc, int ori, int wt,
 {
     charset = DEFAULT_CHARSET;
     return g_orig_CreateFontA(h,w,esc,ori,wt,ital,ul,so,charset,op,cp,q,pf,g_font_face);
+}
+
+/* ── Hook CPB через IAT CreateFileA ── */
+/*
+ * Движок читает CPB файлы из .arc архива через единственный в exe вызов
+ * CreateFileA (0x442c31). Перехватываем IAT CreateFileA: если имя файла
+ * заканчивается на .cpb и в patch\ есть замена — открываем наш файл.
+ */
+typedef HANDLE (WINAPI *CreateFileA_orig_t)(LPCSTR, DWORD, DWORD,
+    LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
+static CreateFileA_orig_t g_orig_CreateFileA_cpb = NULL;
+
+static HANDLE WINAPI hooked_CreateFileA_cpb(
+    LPCSTR lpFileName, DWORD dwAccess, DWORD dwShare,
+    LPSECURITY_ATTRIBUTES lpSA, DWORD dwCreate, DWORD dwFlags, HANDLE hTemplate)
+{
+    if (lpFileName) {
+        /* Проверяем расширение .cpb */
+        const char *dot = strrchr(lpFileName, '.');
+        if (dot && _stricmp(dot, ".cpb") == 0) {
+            /* Берём только basename */
+            const char *base = strrchr(lpFileName, '\\');
+            if (!base) base = strrchr(lpFileName, '/');
+            base = base ? base + 1 : lpFileName;
+
+            char patch_path[MAX_PATH];
+            _snprintf(patch_path, MAX_PATH, PATCH_DIR "%s", base);
+
+            DWORD attr = GetFileAttributesA(patch_path);
+            if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+                char msg[MAX_PATH + 64];
+                _snprintf(msg, sizeof msg, "[patch] CPB redirect: %s -> %s\n",
+                          lpFileName, patch_path);
+                OutputDebugStringA(msg);
+                return g_orig_CreateFileA_cpb(patch_path, dwAccess, dwShare,
+                                              lpSA, dwCreate, dwFlags, hTemplate);
+            }
+        }
+    }
+    return g_orig_CreateFileA_cpb(lpFileName, dwAccess, dwShare,
+                                  lpSA, dwCreate, dwFlags, hTemplate);
 }
 
 /* ── Hook load_script (asb замена) ── */
@@ -183,6 +240,41 @@ void __cdecl our_load_script_c(const char *name, void *data_struct)
     HeapFree(GetProcessHeap(), 0, buf);
 }
 
+
+/* ── DialogBoxParamA hook — подмена текста диалога выхода ── */
+typedef INT_PTR (WINAPI *DialogBoxParamA_t)(HINSTANCE,LPCSTR,HWND,DLGPROC,LPARAM);
+static DialogBoxParamA_t g_orig_DialogBoxParamA = NULL;
+
+static DLGPROC g_orig_dlg_proc = NULL;
+
+static INT_PTR CALLBACK patched_dlg_proc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_INITDIALOG) {
+        DLGPROC orig = (DLGPROC)lp;
+        SetWindowLongA(hDlg, DWLP_USER, (LONG)orig);
+        INT_PTR res = FALSE;
+        if (orig)
+            res = CallWindowProcA((WNDPROC)orig, hDlg, msg, wp, 0);
+        SetDlgItemTextA(hDlg, 1008,
+            "\xc7\xe0\xe2\xe5\xf0\xf8\xe8\xf2\xfc\x20\xe8\xe3\xf0\xf3\x2e\x0a"
+            "\xc2\xfb\x20\xf3\xe2\xe5\xf0\xe5\xed\xfb\x3f");
+        return res;
+    }
+    DLGPROC orig = (DLGPROC)GetWindowLongA(hDlg, DWLP_USER);
+    if (orig)
+        return CallWindowProcA((WNDPROC)orig, hDlg, msg, wp, lp);
+    return FALSE;
+}
+
+static INT_PTR WINAPI hooked_DialogBoxParamA(
+    HINSTANCE hInst, LPCSTR tmpl, HWND hWnd, DLGPROC proc, LPARAM param)
+{
+    char msg[64];
+    _snprintf(msg, sizeof msg, "[patch] DialogBoxParamA tmpl=%p\n", tmpl);
+    OutputDebugStringA(msg);
+    return g_orig_DialogBoxParamA(hInst, tmpl, hWnd, patched_dlg_proc, (LPARAM)proc);
+}
+
 extern void our_load_script(void);
 
 #define ADDR_SIZE_JNZ 0x00420c4au
@@ -217,6 +309,17 @@ static void install_hooks(void) {
         OutputDebugStringA(msg);
     }
 
+    /* CreateFileA IAT — перехватываем открытие .cpb файлов для redirect в patch\ */
+    {
+        DWORD prot;
+        BYTE **iat = (BYTE**)0x0047b220u;
+        VirtualProtect(iat, 4, PAGE_READWRITE, &prot);
+        g_orig_CreateFileA_cpb = (CreateFileA_orig_t)(void*)*iat;
+        *iat = (BYTE*)(void*)hooked_CreateFileA_cpb;
+        VirtualProtect(iat, 4, prot, &prot);
+        OutputDebugStringA("[patch] CreateFileA (CPB) hooked\n");
+    }
+
     /* TextOutA IAT */
     {
         DWORD prot;
@@ -228,6 +331,17 @@ static void install_hooks(void) {
         OutputDebugStringA("[patch] TextOutA hooked\n");
     }
 
+    /* SetWindowTextA IAT */
+    {
+        DWORD prot;
+        BYTE **iat = (BYTE**)0x0047b394u;
+        VirtualProtect(iat, 4, PAGE_READWRITE, &prot);
+        g_orig_SetWindowTextA = (SetWindowTextA_t)(void*)*iat;
+        *iat = (BYTE*)(void*)hooked_SetWindowTextA;
+        VirtualProtect(iat, 4, prot, &prot);
+        OutputDebugStringA("[patch] SetWindowTextA hooked\n");
+    }
+
     /* CreateFontA IAT */
     {
         DWORD prot;
@@ -237,6 +351,17 @@ static void install_hooks(void) {
         *iat = (BYTE*)(void*)hooked_CreateFontA;
         VirtualProtect(iat, 4, prot, &prot);
         OutputDebugStringA("[patch] CreateFontA hooked\n");
+    }
+	
+	/* DialogBoxParamA IAT */
+    {
+        DWORD prot;
+        BYTE **iat = (BYTE**)0x0047b2f8u;
+        VirtualProtect(iat, 4, PAGE_READWRITE, &prot);
+        g_orig_DialogBoxParamA = (DialogBoxParamA_t)(void*)*iat;
+        *iat = (BYTE*)(void*)hooked_DialogBoxParamA;
+        VirtualProtect(iat, 4, prot, &prot);
+        OutputDebugStringA("[patch] DialogBoxParamA hooked\n");
     }
 }
 
