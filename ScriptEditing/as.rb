@@ -137,12 +137,16 @@ def build_shared_strings_xml
   XML
 end
 
-def build_sheet_xml(rows, col_widths)
-  # rows = array of arrays of [type, value] where type: :s (shared string), :n (number), :str (inline)
+def build_sheet_xml(rows, col_widths, last_data_row)
+  # rows = array of arrays of [type, value] where type:
+  #   :s  — shared string
+  #   :n  — number
+  #   :h  — header (shared string, особый стиль)
+  #   :f  — formula (inline, строка формулы Excel)
   cols_xml = col_widths.each_with_index.map { |w, i|
     "<col min=\"#{i+1}\" max=\"#{i+1}\" width=\"#{w}\" customWidth=\"1\"/>"
   }.join
-  
+
   rows_xml = rows.each_with_index.map { |row, ri|
     cells = row.each_with_index.map { |cell, ci|
       ref = cell_ref(ci, ri+1)
@@ -152,12 +156,66 @@ def build_sheet_xml(rows, col_widths)
         "<c r=\"#{ref}\" t=\"s\" s=\"#{ci < 4 ? 1 : 0}\"><v>#{val}</v></c>"
       when :n
         "<c r=\"#{ref}\" s=\"2\"><v>#{val}</v></c>"
-      when :h  # header
+      when :h
         "<c r=\"#{ref}\" t=\"s\" s=\"3\"><v>#{val}</v></c>"
+      when :f
+        # Формула; стиль 8 — центр без заливки (CF перекроет цвет)
+        "<c r=\"#{ref}\" s=\"8\"><f>#{xml_esc(val)}</f></c>"
       end
     }.join
     "<row r=\"#{ri+1}\">#{cells}</row>"
   }.join
+
+  # Условное форматирование для колонок F (TL, индекс 4) и H (TLE, индекс 6)
+  # Статус TL — колонка G (индекс 6), статус TLE — колонка I (индекс 8)
+  # Формулы смотрят на E (TL) и G (TLE), сравнивают с F (MaxБайт)
+  #
+  # Порядок правил важен: Excel применяет первое совпавшее.
+  # priority: меньше = выше приоритет.
+
+  cf_tl = if last_data_row >= 2
+    ref = "G2:G#{last_data_row}"
+    <<~CF
+      <conditionalFormatting sqref="#{ref}">
+        <cfRule type="expression" priority="1" dxfId="0">
+          <formula>AND(E2&lt;&gt;"",LEN(E2)&gt;F2)</formula>
+        </cfRule>
+        <cfRule type="expression" priority="2" dxfId="1">
+          <formula>AND(E2&lt;&gt;"",LEN(E2)&gt;F2-6,LEN(E2)&lt;=F2)</formula>
+        </cfRule>
+        <cfRule type="expression" priority="3" dxfId="2">
+          <formula>AND(E2&lt;&gt;"",LEN(E2)&lt;=F2-6)</formula>
+        </cfRule>
+        <cfRule type="expression" priority="4" dxfId="3">
+          <formula>E2=""</formula>
+        </cfRule>
+      </conditionalFormatting>
+    CF
+  else
+    ''
+  end
+
+  cf_tle = if last_data_row >= 2
+    ref = "I2:I#{last_data_row}"
+    <<~CF
+      <conditionalFormatting sqref="#{ref}">
+        <cfRule type="expression" priority="5" dxfId="0">
+          <formula>AND(G2&lt;&gt;"",LEN(G2)&gt;F2)</formula>
+        </cfRule>
+        <cfRule type="expression" priority="6" dxfId="1">
+          <formula>AND(G2&lt;&gt;"",LEN(G2)&gt;F2-6,LEN(G2)&lt;=F2)</formula>
+        </cfRule>
+        <cfRule type="expression" priority="7" dxfId="2">
+          <formula>AND(G2&lt;&gt;"",LEN(G2)&lt;=F2-6)</formula>
+        </cfRule>
+        <cfRule type="expression" priority="8" dxfId="3">
+          <formula>G2=""</formula>
+        </cfRule>
+      </conditionalFormatting>
+    CF
+  else
+    ''
+  end
 
   <<~XML
     <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -166,6 +224,10 @@ def build_sheet_xml(rows, col_widths)
     <sheetFormatPr defaultRowHeight="15"/>
     <cols>#{cols_xml}</cols>
     <sheetData>#{rows_xml}</sheetData>
+    <autoFilter ref="A1:I#{last_data_row}"/>
+    <sheetView workbookViewId="0"><selection activeCell="E2" sqref="E2"/></sheetView>
+    #{cf_tl}
+    #{cf_tle}
     </worksheet>
   XML
 end
@@ -174,14 +236,19 @@ def build_styles_xml
   <<~XML
     <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
     <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-    <fonts count="2">
+    <fonts count="3">
       <font><sz val="10"/><name val="Arial"/></font>
       <font><sz val="10"/><name val="Arial"/><b/></font>
+      <font><sz val="10"/><name val="Arial"/><b/><color rgb="FF721C24"/></font>
     </fonts>
-    <fills count="3">
+    <fills count="7">
       <fill><patternFill patternType="none"/></fill>
       <fill><patternFill patternType="gray125"/></fill>
       <fill><patternFill patternType="solid"><fgColor rgb="FFD9EAD3"/></patternFill></fill>
+      <fill><patternFill patternType="solid"><fgColor rgb="FFD4EDDA"/></patternFill></fill>
+      <fill><patternFill patternType="solid"><fgColor rgb="FFFFF3CD"/></patternFill></fill>
+      <fill><patternFill patternType="solid"><fgColor rgb="FFF8D7DA"/></patternFill></fill>
+      <fill><patternFill patternType="solid"><fgColor rgb="FFEEEEEE"/></patternFill></fill>
     </fills>
     <borders count="2">
       <border><left/><right/><top/><bottom/><diagonal/></border>
@@ -193,20 +260,65 @@ def build_styles_xml
       </border>
     </borders>
     <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-    <cellXfs count="4">
+    <cellXfs count="9">
+      <!-- 0: обычный с переносом -->
       <xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1">
-        <alignment wrapText="1"/>
+        <alignment wrapText="1" vertical="top"/>
       </xf>
+      <!-- 1: обычный с переносом (дубль для совместимости) -->
       <xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1">
-        <alignment wrapText="1"/>
+        <alignment wrapText="1" vertical="top"/>
       </xf>
+      <!-- 2: число по центру -->
       <xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1">
-        <alignment horizontal="center"/>
+        <alignment horizontal="center" vertical="top"/>
       </xf>
+      <!-- 3: заголовок (зелёный фон, жирный, центр) -->
       <xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1">
         <alignment horizontal="center" wrapText="1"/>
       </xf>
+      <!-- 4: статус OK — зелёный -->
+      <xf numFmtId="0" fontId="0" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1">
+        <alignment horizontal="center" vertical="top"/>
+      </xf>
+      <!-- 5: статус WARN — жёлтый -->
+      <xf numFmtId="0" fontId="0" fillId="4" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1">
+        <alignment horizontal="center" vertical="top"/>
+      </xf>
+      <!-- 6: статус OVER — красный, жирный -->
+      <xf numFmtId="0" fontId="2" fillId="5" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1">
+        <alignment horizontal="center" vertical="top"/>
+      </xf>
+      <!-- 7: статус EMPTY — серый -->
+      <xf numFmtId="0" fontId="0" fillId="6" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1">
+        <alignment horizontal="center" vertical="top"/>
+      </xf>
+      <!-- 8: формула (inline string) по центру -->
+      <xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1">
+        <alignment horizontal="center" vertical="top"/>
+      </xf>
     </cellXfs>
+    <!-- dxf: дифференциальные форматы для условного форматирования -->
+    <!-- dxfId=0: OVER — красный фон, жирный красный текст -->
+    <!-- dxfId=1: WARN — жёлтый фон -->
+    <!-- dxfId=2: OK   — зелёный фон -->
+    <!-- dxfId=3: EMPTY— серый фон, серый текст -->
+    <dxfs count="4">
+      <dxf>
+        <font><b/><color rgb="FF721C24"/></font>
+        <fill><patternFill><bgColor rgb="FFF8D7DA"/></patternFill></fill>
+      </dxf>
+      <dxf>
+        <fill><patternFill><bgColor rgb="FFFFF3CD"/></patternFill></fill>
+      </dxf>
+      <dxf>
+        <fill><patternFill><bgColor rgb="FFD4EDDA"/></patternFill></fill>
+      </dxf>
+      <dxf>
+        <font><color rgb="FF999999"/></font>
+        <fill><patternFill><bgColor rgb="FFEEEEEE"/></patternFill></fill>
+      </dxf>
+    </dxfs>
     </styleSheet>
   XML
 end
@@ -273,7 +385,8 @@ def write_xlsx(path, sheets)
 
   # xl/worksheets/sheetN.xml
   sheets.each_with_index do |sh, i|
-    files["xl/worksheets/sheet#{i+1}.xml"] = build_sheet_xml(sh[:rows], sh[:col_widths])
+    last_data_row = sh[:rows].size  # строки 1..N, заголовок = строка 1
+    files["xl/worksheets/sheet#{i+1}.xml"] = build_sheet_xml(sh[:rows], sh[:col_widths], last_data_row)
   end
 
   # xl/sharedStrings.xml (заполняется при build_sheet_xml вызовах)
@@ -356,24 +469,34 @@ def cmd_export(asb_dir, output_xlsx)
 
     puts "[+] #{File.basename(asb_path)}: #{strings.size} строк"
 
-    # Заголовок
-    headers = ['Персонаж', 'Имя TL', 'Имя Байты', 'Оригинал', 'TL', 'MaxБайт', 'TLE']
+    # Заголовок: Персонаж | Имя TL | Имя Байты | Оригинал | TL | MaxБайт | TLE | St.TL | St.TLE
+    headers = ['Персонаж', 'Имя TL', 'Имя Байты', 'Оригинал', 'TL', 'MaxБайт', 'TLE', 'St.TL', 'St.TLE']
     rows = [headers.map { |h| [:h, ss(h)] }]
 
-    strings.each do |s|
+    strings.each_with_index do |s, idx|
+      xls_row = idx + 2  # строка в Excel (1 = заголовок)
+
+      # Формула статуса TL (колонка G, смотрит на E=TL и F=MaxБайт):
+      # Если E пустое → "-", иначе "LEN/MAX"
+      formula_tl  = "IF(E#{xls_row}=\"\",\"-\",LEN(E#{xls_row})&\"/\"&F#{xls_row})"
+      # Формула статуса TLE (колонка I, смотрит на G=TLE):
+      formula_tle = "IF(G#{xls_row}=\"\",\"-\",LEN(G#{xls_row})&\"/\"&F#{xls_row})"
+
       row = [
-        [:s, ss(s[:speaker] || '')],
-        [:s, ss('')],
-        [:n, s[:name_len] || 0],
-        [:s, ss(s[:text])],
-        [:s, ss('')],
-        [:n, s[:length]],
-        [:s, ss('')]
+        [:s, ss(s[:speaker] || '')],   # A Персонаж
+        [:s, ss('')],                   # B Имя TL
+        [:n, s[:name_len] || 0],        # C Имя Байты
+        [:s, ss(s[:text])],             # D Оригинал
+        [:s, ss('')],                   # E TL
+        [:n, s[:length]],               # F MaxБайт
+        [:s, ss('')],                   # G TLE
+        [:f, formula_tl],               # H St.TL
+        [:f, formula_tle],              # I St.TLE
       ]
       rows << row
     end
 
-    { name: name[0, 31], rows: rows, col_widths: [18, 20, 10, 50, 50, 10, 50] }
+    { name: name[0, 31], rows: rows, col_widths: [18, 20, 10, 50, 50, 8, 50, 9, 9] }
   end
 
   write_xlsx(output_xlsx, sheets)
