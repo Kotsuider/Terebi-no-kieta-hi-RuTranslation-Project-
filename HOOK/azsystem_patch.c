@@ -83,49 +83,28 @@ static BOOL WINAPI hooked_TextOutA(HDC hdc, int x, int y, LPCSTR str, int cb)
         OutputDebugStringA("[patch] Found 0x16, will skip next char\n");
         return TRUE;
     }
-	if (ch == 0x85) {
-        skip_next = TRUE;
-        OutputDebugStringA("[patch] Found troetoczie, will skip next char\n");
-    }
 
-    
+    // Исходный байт 0xFF (EOF / разделитель движка) игнорируем, чтобы не было фантомной 'я'
     if (ch == 0xFF) {
         return TRUE;
     }
-    
+
+    // Настоящая 'я' закодирована в скрипте как 'z', её переводим в 0xFF ('я')
     if (ch == 'z') {
-        OutputDebugStringA("[patch] Replacing 'z' (0x7A) -> 'я' (0xFF)\n");
         ch = 0xFF;
     }
 
     int allowed = 0;
-    if ((ch >= 0xC0 && ch <= 0xFF && ch != 0x9A) || // кириллица CP1251
-        ch == '.' || ch == ',' || ch == '"' || ch == '\'' ||
-        ch == '?' || ch == '!' || ch == 0x85 || ch == ' ' || ch == 0xB8 || ch == 0xA8 || ch == ':' || ch == '-' || ch == '1' || ch == '2' || ch == '3' || ch == '4' || ch == '5' || ch == '6' || ch == '7' || ch == '8' || ch == '9' || ch == '0')
+    // Разрешаем: кириллицу CP1251 (0xC0..0xFF, а также Ё 0xA8, ё 0xB8),
+    // ASCII печатные символы (0x20..0x7E),
+    // троеточие (0x85), длинное/короткое тире (0x96, 0x97), кавычки-ёлочки (0xAB, 0xBB), кавычки (0x84, 0x93, 0x94)
+    if ((ch >= 0xC0 && ch <= 0xFF) ||
+        (ch >= 0x20 && ch <= 0x7E) ||
+        ch == 0x85 || ch == 0x96 || ch == 0x97 || ch == 0xAB || ch == 0xBB ||
+        ch == 0x84 || ch == 0x93 || ch == 0x94 || ch == 0xA8 || ch == 0xB8)
     {
         allowed = 1;
     }
-
-    // ... логирование и вывод ...
-    char dbg[64];
-    const char* status = allowed ? "ALLOW" : "SKIP";
-    
-    if (ch >= 0x80) {
-        _snprintf(dbg, sizeof(dbg), "[patch] [%s] 0x%02X [%c] (CP1251)\n", status, ch, ch);
-    } else if (ch >= 0x20 && ch < 0x7F) {
-        _snprintf(dbg, sizeof(dbg), "[patch] [%s] 0x%02X [%c] (ASCII)\n", status, ch, ch);
-    } else if (ch == 0x00) {
-        _snprintf(dbg, sizeof(dbg), "[patch] [%s] 0x%02X [NULL]\n", status, ch);
-    } else if (ch == 0x09) {
-        _snprintf(dbg, sizeof(dbg), "[patch] [%s] 0x%02X [TAB]\n", status, ch);
-    } else if (ch == 0x0A) {
-        _snprintf(dbg, sizeof(dbg), "[patch] [%s] 0x%02X [LF]\n", status, ch);
-    } else if (ch == 0x0D) {
-        _snprintf(dbg, sizeof(dbg), "[patch] [%s] 0x%02X [CR]\n", status, ch);
-    } else {
-        _snprintf(dbg, sizeof(dbg), "[patch] [%s] 0x%02X [0x%02X]\n", status, ch, ch);
-    }
-    OutputDebugStringA(dbg);
 
     if (!allowed) {
         return TRUE;
@@ -292,6 +271,32 @@ static const DWORD g_callsites[] = {
 };
 
 static void install_hooks(void) {
+    /* ── Патчим проверку Shift-JIS Lead-Byte для 100% однобайтного режима (CP1251) ── */
+    {
+        BYTE nop2[2] = {0x90, 0x90};
+        BYTE jmp_eb03[2] = {0xEB, 0x03};
+        BYTE jmp_eb05[2] = {0xEB, 0x05};
+        BYTE jmp_eb3d[2] = {0xEB, 0x3D};
+
+        BYTE *s1 = (BYTE*)0x0041c2d1u;
+        if (s1[0] == 0x76 && s1[1] == 0x24) { mem_patch(s1, nop2, 2); OutputDebugStringA("[patch] Lead-byte 1 patched\n"); }
+
+        BYTE *s2 = (BYTE*)0x0041c4b1u;
+        if (s2[0] == 0x76 && s2[1] == 0x29) { mem_patch(s2, nop2, 2); OutputDebugStringA("[patch] Lead-byte 2 patched\n"); }
+
+        BYTE *s3 = (BYTE*)0x0041c6a2u;
+        if (s3[0] == 0x76 && s3[1] == 0x2c) { mem_patch(s3, nop2, 2); OutputDebugStringA("[patch] Lead-byte 3 patched\n"); }
+
+        BYTE *s4 = (BYTE*)0x004324deu;
+        if (s4[0] == 0x77 && s4[1] == 0x03) { mem_patch(s4, jmp_eb03, 2); OutputDebugStringA("[patch] Lead-byte 4 patched\n"); }
+
+        BYTE *s5 = (BYTE*)0x00432aebu;
+        if (s5[0] == 0x77 && s5[1] == 0x05) { mem_patch(s5, jmp_eb05, 2); OutputDebugStringA("[patch] Lead-byte 5 patched\n"); }
+
+        BYTE *s6 = (BYTE*)0x00432d2du;
+        if (s6[0] == 0x77 && s6[1] == 0x3d) { mem_patch(s6, jmp_eb3d, 2); OutputDebugStringA("[patch] Lead-byte 6 patched\n"); }
+    }
+
     BYTE nop2[2] = {0x90,0x90};
     BYTE *jnz = (BYTE*)ADDR_SIZE_JNZ;
     if (jnz[0] == 0x75) {
