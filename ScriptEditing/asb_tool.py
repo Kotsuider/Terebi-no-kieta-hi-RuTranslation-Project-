@@ -9,8 +9,15 @@ import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 
 SRC_ENC = 'shift_jis'
-DST_ENC = 'cp1251'
-DEFAULT_WRAP_WIDTH = 0
+DST_ENC = 'cp1252'
+DEFAULT_WRAP_WIDTH = 42
+MAX_LINES_LIMIT = 3
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+try:
+    from ru_f_translate import apply_ru_f
+except ImportError:
+    apply_ru_f = lambda x: x
 
 def parse_asb_commands(data: bytes):
     pos = 0
@@ -138,12 +145,28 @@ def wrap_text_by_words(text: str, max_width: int = DEFAULT_WRAP_WIDTH) -> str:
     return r'\n'.join(wrapped_paras)
 
 def prepare_translation_text(text: str, wrap_width: int = DEFAULT_WRAP_WIDTH) -> str:
-    t = text
+    t = text.replace('\u3000', '  ')
     if wrap_width > 0:
         t = wrap_text_by_words(t, wrap_width)
     t = t.replace('… ', '…')
     t = t.replace('…', '… ')
-    t = t.replace('я', 'z')
+
+    # Конвертируем кириллицу в латиницу/спецсимволы RU_F под кастомный шрифт OUCTSfontD1.ttf
+    # Заметьте: разделители переноса строк r'\n' состоят из '\' и 'n', которые не заменяются apply_ru_f
+    t = apply_ru_f(t)
+
+    # Проверка перед '\n' на случай, если какой-то символ попадает в Lead Byte
+    if r'\n' in t:
+        parts = t.split(r'\n')
+        safe_res = parts[0]
+        for p in parts[1:]:
+            if safe_res:
+                b_last = safe_res.encode(DST_ENC, errors='replace')[-1]
+                if (0x81 <= b_last <= 0x9F) or (0xE0 <= b_last <= 0xFC):
+                    safe_res += ' '
+            safe_res += r'\n' + p
+        t = safe_res
+
     return t
 
 def cmd_export(asb_dir: str, output_xlsx: str):
@@ -209,8 +232,19 @@ def cmd_import(asb_dir: str, input_xlsx: str, output_dir: str, wrap_width: int =
 
     total_files = 0
     total_replaced = 0
+    overflow_records = []
+    EXCLUDE_SHEETS = {'startup'}
 
     for sheet_name in sheet_names:
+        if sheet_name in EXCLUDE_SHEETS:
+            # Копируем оригинальный файл без изменений
+            orig_src = os.path.join(asb_dir, sheet_name + '.asb')
+            if os.path.exists(orig_src):
+                import shutil
+                shutil.copy2(orig_src, os.path.join(output_dir, sheet_name + '.asb'))
+                total_files += 1
+            continue
+
         asb_candidates = [
             os.path.join(asb_dir, sheet_name + '.asb'),
             os.path.join(asb_dir, sheet_name)
@@ -236,6 +270,7 @@ def cmd_import(asb_dir: str, input_xlsx: str, output_dir: str, wrap_width: int =
                 info = parse_op26_text(cmd['raw'])
                 if info:
                     if diag_idx < len(dialogue_rows):
+                        excel_row_num = diag_idx + 2  # 1-indexed, заголовок на строке 1
                         row = dialogue_rows[diag_idx]
                         diag_idx += 1
 
@@ -256,6 +291,20 @@ def cmd_import(asb_dir: str, input_xlsx: str, output_dir: str, wrap_width: int =
                             file_replaced += 1
                             new_text_str = trans if trans else info['text']
                             trans_proc = prepare_translation_text(new_text_str, wrap_width=wrap_width)
+                            
+                            # Проверяем количество строк после переноса
+                            if wrap_width > 0 and trans:
+                                line_count = trans_proc.count(r'\n') + 1
+                                if line_count > MAX_LINES_LIMIT:
+                                    overflow_records.append({
+                                        'sheet': sheet_name,
+                                        'row': excel_row_num,
+                                        'line_count': line_count,
+                                        'speaker': speaker_tl or info['speaker'],
+                                        'text': trans,
+                                        'wrapped': trans_proc.replace(r'\n', '\n')
+                                    })
+
                             new_text_bytes = trans_proc.encode(DST_ENC, errors='replace')
 
                             new_spk_bytes = None
@@ -280,6 +329,32 @@ def cmd_import(asb_dir: str, input_xlsx: str, output_dir: str, wrap_width: int =
             print('  [+] ' + sheet_name + '.asb: ' + str(file_replaced) + ' lines replaced (' + str(len(data)) + ' -> ' + str(len(new_asb_data)) + ' bytes)')
 
     print('[+] Finished! Processed ' + str(total_files) + ' files, ' + str(total_replaced) + ' lines replaced.')
+
+    # Запись лога превышения строк
+    report_path = os.path.join(os.path.dirname(input_xlsx), 'exceeded_lines.txt')
+    if not os.path.isabs(report_path):
+        report_path = os.path.abspath(report_path)
+
+    with open(report_path, 'w', encoding='utf-8') as rf:
+        rf.write("================================================================================\n")
+        rf.write(f"  ОТЧЁТ О СТРОКАХ, ПРЕВЫШАЮЩИХ ЛИМИТ В {MAX_LINES_LIMIT} СТРОКИ (ШИРИНА: {wrap_width} СИМВОЛОВ)\n")
+        rf.write(f"  Всего превышений: {len(overflow_records)}\n")
+        rf.write("================================================================================\n\n")
+        for rec in overflow_records:
+            spk_str = f" [{rec['speaker']}]" if rec['speaker'] else ""
+            rf.write(f"Лист: {rec['sheet']} | Строка в Excel: {rec['row']}{spk_str} | Строк: {rec['line_count']}\n")
+            rf.write("Текст в Excel:\n")
+            rf.write(f"  {rec['text']}\n")
+            rf.write("Как разобьётся на экране:\n")
+            for sub_i, sub_line in enumerate(rec['wrapped'].split('\n'), start=1):
+                rf.write(f"  {sub_i}: {sub_line}\n")
+            rf.write("-" * 80 + "\n\n")
+
+    if overflow_records:
+        print(f"\n[!] ВНИМАНИЕ: Найдено {len(overflow_records)} реплик, которые превышают {MAX_LINES_LIMIT} строки в окне!")
+        print(f"[!] Полный список с номерами строк сохранён в: {report_path}\n")
+    else:
+        print(f"\n[+] Отлично! Ни одна реплика не превышает лимит в {MAX_LINES_LIMIT} строки.\n")
 
     if auto_pack:
         pack_script = os.path.join(os.path.dirname(__file__), 'arc_pack.py')

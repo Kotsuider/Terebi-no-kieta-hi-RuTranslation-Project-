@@ -1,0 +1,50 @@
+{
+  "injector": {
+    "enable": true,
+    "target_module": "tvlost_rus_new.exe",
+    "print_loaded_modules": true
+  },
+  
+    "allocate_console": false,
+	
+	"file_monitor": {
+    "enable": true,
+    "log_all": false,
+    "actions": [
+      {
+        "pattern": "^(?:.*[\\\\/])?([a-zA-Z0-9_\\-]+\\.cpb)$",
+        "redirect": "patch/$1"
+      }
+     ]
+    },
+
+    "character_substitution": {
+      "enable": true,
+      "source_characters": "><+%#^@;/",
+      "target_characters": "ÓÕ¹²É«»{}"
+    },
+
+    "font_manager": {
+      "enable": true,
+      "resource_files": [
+        "OUCTSfontD1.ttf"
+      ],
+      "spoof_enumeration": {
+        "enable": true,
+        "filter_pitch_and_family": 1,
+        "filter_charset": 1,
+        "spoof_charset": 128
+      },
+      "spoof_creation": {
+        "enable": true,
+        "override_face": "OUCTSfontD1",
+        "override_charset": 0
+      }
+    },
+
+    "window_manager": {
+    "enable": true,
+    "overwrite_title": "День, когда пропало телевидение",
+    "process_existing_windows": true
+  }
+}

@@ -421,9 +421,24 @@ def azsystem_compress(data: bytes) -> bytes:
 # Обёртка файлов во внутренние контейнеры (ASB и т.д.)
 # ---------------------------------------------------------------------------
 
+def count_asb_commands(data: bytes) -> int:
+    pos = 0
+    cmds = 0
+    total = len(data)
+    while pos < total:
+        if pos + 2 > total:
+            break
+        sz = data[pos] | (data[pos+1] << 8)
+        if sz <= 0 or pos + sz > total:
+            break
+        cmds += 1
+        pos += sz
+    return cmds
+
 def wrap_asb(data: bytes) -> bytes:
     """Упаковывает голые ASB-данные обратно в ASB-контейнер (старый формат)."""
     uncomprlen = len(data)
+    cmd_count = count_asb_commands(data)
     inner = azsystem_compress(data)   # [ewf_crc(4)][zlib]
     comprlen = len(inner)
     # asb_decompress делает *enc_data -= key, значит при упаковке += key
@@ -433,8 +448,8 @@ def wrap_asb(data: bytes) -> bytes:
         off = i * 4
         val = struct.unpack_from('<I', inner_enc, off)[0]
         struct.pack_into('<I', inner_enc, off, (val + key) & 0xffffffff)
-    # asb_header_t: magic[4], comprlen, uncomprlen, unknown
-    header = struct.pack('<4sIII', b'ASB\x00', comprlen, uncomprlen, 0)
+    # asb_header_t: magic[4], comprlen, uncomprlen, command_count
+    header = struct.pack('<4sIII', b'ASB\x00', comprlen, uncomprlen, cmd_count)
     return header + bytes(inner_enc)
 
 

@@ -7,13 +7,13 @@
 ## Статус
 
 **Progress:**
-`[███░░░░░░░░░░░░░░░░] 15%`
+`[▩▩▩▩▩▩▩▩▩▩▩▩▩▩▢▢▢▢▢▢▢▢] 65%`
 
 - [x] Хук скриптов
 - [x] Хук изображений
 - [x] Перевод системного текста
 - [ ] Перевод графики
-- [ ] Полный перевод
+- [x] Полный перевод
 - [ ] Редактура
 
 [Таблица с переводом](https://docs.google.com/spreadsheets/d/1bTiLPGrwKxYp-zPZWDMAJWUjgxtnp7Kt/edit?usp=sharing&ouid=103224880279791937700&rtpof=true&sd=true) .
@@ -32,15 +32,6 @@ crage -d "E:\テレビの消えた日" -O mt=SFMT132049,system="E:\テレビの�
 
 Получаем распакованные папки, нам нужна script. 
 
-Испортируем:
-```Ruby
-ruby as.rb import ./script ./Tereba.xlsx ./patch
+Упаковка:
+запустите build_patch.bat
 
-```
-
-### Упаковщик
-
-Отредактированные файлы можно упаковать, однако лучше их закинуть в patch 
-```Python
-python arc_pack.py ./script script.arc system.arc script_original.arc
-```
