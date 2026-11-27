@@ -48,3 +48,6 @@ backup_*/
 
 # Local choice tests
 /ScriptEditing/test_choice_text.py
+
+# Include the translated script archive; keep other game archives ignored
+!/script.arc
