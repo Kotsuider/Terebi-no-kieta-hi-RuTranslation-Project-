@@ -4,6 +4,7 @@ import glob
 import struct
 import argparse
 import textwrap
+import difflib
 from pathlib import Path
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
@@ -25,10 +26,10 @@ def parse_asb_commands(data: bytes):
     commands = []
     while pos < total:
         if pos + 2 > total:
-            break
+            raise ValueError(f'Truncated ASB header at {pos:#x}')
         sz = data[pos] | (data[pos+1] << 8)
-        if sz <= 0 or pos + sz > total:
-            break
+        if sz < 12 or pos + sz > total:
+            raise ValueError(f'Invalid ASB command size {sz} at {pos:#x}')
         opcode = data[pos+2] | (data[pos+3] << 8) if sz >= 4 else 0
         commands.append({
             'pos': pos,
@@ -38,6 +39,64 @@ def parse_asb_commands(data: bytes):
         })
         pos += sz
     return commands
+
+
+def align_dialogue_rows(commands, rows):
+    """Join by original text, never silently shift dialogue after a spurious XLSX row."""
+    normalize = lambda text: str(text or '').replace('\u2014', '\u2015')
+    dialogue = [parse_op26_text(c['raw']) for c in commands if c['opcode'] == 26]
+    dialogue = [d for d in dialogue if d is not None]
+    originals = [normalize(d['text']) for d in dialogue]
+    cells = [normalize(row[3]) for row in rows]
+    aligned = []
+    for tag, start, end, row_start, row_end in difflib.SequenceMatcher(
+            None, originals, cells, autojunk=False).get_opcodes():
+        if tag == 'equal':
+            aligned.extend((i + 2, rows[i]) for i in range(row_start, row_end))
+        elif tag == 'insert':
+            for i in range(row_start, row_end):
+                value = cells[i]
+                # Known legacy exporter false positive: a resource name, not dialogue.
+                if not (not rows[i][0] and value == 'bg005a'):
+                    raise ValueError(f'Unexpected extra worksheet row {i + 2}: {value!r}')
+                print(f'  [!] Ignored resource row {i + 2}: {value}')
+        else:
+            raise ValueError(f'Original text mismatch: ASB dialogue {start + 1}, Excel row {row_start + 2}; refusing positional import')
+    if len(aligned) != len(dialogue):
+        raise ValueError('Incomplete dialogue alignment')
+    return aligned
+
+
+def relocate_commands(commands, chunks, original_length):
+    """ASB opcodes 4/5 store an absolute byte destination at header offset 4."""
+    positions = {}
+    offset = 0
+    for command, chunk in zip(commands, chunks):
+        positions[command['pos']] = offset
+        offset += len(chunk)
+    positions[original_length] = offset
+    output = []
+    for command, chunk in zip(commands, chunks):
+        if command['opcode'] in (4, 5):
+            target = struct.unpack_from('<I', command['raw'], 4)[0]
+            if target not in positions:
+                raise ValueError(f'Jump at {command["pos"]:#x} targets non-command {target:#x}')
+            chunk = bytearray(chunk)
+            struct.pack_into('<I', chunk, 4, positions[target])
+            chunk = bytes(chunk)
+        output.append(chunk)
+    return b''.join(output)
+
+
+def encode_runtime_text(text):
+    """RU_F single-byte glyphs plus native SJIS symbols (e.g. musical notes)."""
+    output = bytearray()
+    for char in text:
+        try:
+            output.extend(char.encode(DST_ENC, errors='strict'))
+        except UnicodeEncodeError:
+            output.extend(char.encode('cp932', errors='strict'))
+    return bytes(output)
 
 def parse_op26_text(cmd_bytes: bytes):
     if len(cmd_bytes) < 17 or cmd_bytes[-3:] != b'\x00\x02\x1c':
@@ -224,6 +283,10 @@ def cmd_export(asb_dir: str, output_xlsx: str):
     return True
 
 def cmd_import(asb_dir: str, input_xlsx: str, output_dir: str, wrap_width: int = DEFAULT_WRAP_WIDTH, auto_pack: bool = False):
+    # Check private build input before writing any script outputs.
+    choice_dictionary = Path(__file__).with_name('choice_translations.json')
+    if not choice_dictionary.is_file():
+        raise FileNotFoundError('Private choice dictionary is not included in Git. Provide it locally: ' + str(choice_dictionary))
     os.makedirs(output_dir, exist_ok=True)
     print('[*] Loading workbook: ' + input_xlsx)
     wb = openpyxl.load_workbook(input_xlsx, data_only=True)
@@ -259,7 +322,7 @@ def cmd_import(asb_dir: str, input_xlsx: str, output_dir: str, wrap_width: int =
 
         cmds = parse_asb_commands(data)
         rows_data = list(ws.iter_rows(values_only=True))
-        dialogue_rows = rows_data[1:] if len(rows_data) > 1 else []
+        dialogue_rows = align_dialogue_rows(cmds, rows_data[1:] if len(rows_data) > 1 else [])
         diag_idx = 0
 
         new_cmd_chunks = []
@@ -270,8 +333,7 @@ def cmd_import(asb_dir: str, input_xlsx: str, output_dir: str, wrap_width: int =
                 info = parse_op26_text(cmd['raw'])
                 if info:
                     if diag_idx < len(dialogue_rows):
-                        excel_row_num = diag_idx + 2  # 1-indexed, заголовок на строке 1
-                        row = dialogue_rows[diag_idx]
+                        excel_row_num, row = dialogue_rows[diag_idx]
                         diag_idx += 1
 
                         speaker_tl = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ''
@@ -305,12 +367,13 @@ def cmd_import(asb_dir: str, input_xlsx: str, output_dir: str, wrap_width: int =
                                         'wrapped': trans_proc.replace(r'\n', '\n')
                                     })
 
-                            new_text_bytes = trans_proc.encode(DST_ENC, errors='replace')
+                            new_text_bytes = (encode_runtime_text(trans_proc)
+                                              if trans else info['text_raw'])
 
                             new_spk_bytes = None
                             if speaker_tl:
                                 spk_proc = prepare_translation_text(speaker_tl, wrap_width=0)
-                                new_spk_bytes = spk_proc.encode(DST_ENC, errors='replace')
+                                new_spk_bytes = encode_runtime_text(spk_proc)
 
                             new_cmd_raw = build_op26_command(info, new_spk_bytes, new_text_bytes)
                             new_cmd_chunks.append(new_cmd_raw)
@@ -318,7 +381,7 @@ def cmd_import(asb_dir: str, input_xlsx: str, output_dir: str, wrap_width: int =
 
             new_cmd_chunks.append(cmd['raw'])
 
-        new_asb_data = b''.join(new_cmd_chunks)
+        new_asb_data = relocate_commands(cmds, new_cmd_chunks, len(data))
         out_asb_path = os.path.join(output_dir, sheet_name + '.asb')
         with open(out_asb_path, 'wb') as f:
             f.write(new_asb_data)
@@ -355,6 +418,12 @@ def cmd_import(asb_dir: str, input_xlsx: str, output_dir: str, wrap_width: int =
         print(f"[!] Полный список с номерами строк сохранён в: {report_path}\n")
     else:
         print(f"\n[+] Отлично! Ни одна реплика не превышает лимит в {MAX_LINES_LIMIT} строки.\n")
+
+    # Choice labels use opcode 0x15 and are absent from dialogue worksheets.
+    # Apply after all sheets so startup (copied above) is handled as well.
+    from choice_text import translate_folder
+    choice_report = translate_folder(Path(output_dir), Path(__file__).with_name('choice_translations.json'))
+    print('[+] Choice labels: ' + str(choice_report))
 
     if auto_pack:
         pack_script = os.path.join(os.path.dirname(__file__), 'arc_pack.py')

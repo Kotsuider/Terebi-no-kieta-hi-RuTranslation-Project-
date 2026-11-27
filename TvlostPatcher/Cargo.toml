@@ -1,0 +1,21 @@
+[package]
+name = "tvlost-patcher"
+version = "1.1.1"
+edition = "2024"
+default-run = "tvlost-patcher"
+
+[dependencies]
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+panic = "abort"
+
+[[bin]]
+name = "tvlost-patcher"
+path = "src/main.rs"
+
+[[bin]]
+name = "make-patch"
+path = "src/bin/make_patch.rs"

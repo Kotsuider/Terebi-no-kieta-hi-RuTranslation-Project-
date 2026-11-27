@@ -1,0 +1,9 @@
+/target/
+/test-output/
+
+# Generated test report and historical patch snapshots
+/TEST_REPORT.json
+/patch/archive/
+
+# The ready-to-run release binary is tracked at the repository root.
+/dist/*.exe
